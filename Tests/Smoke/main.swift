@@ -1,0 +1,156 @@
+import AppKit
+import ApplicationServices
+
+var failures: [String] = []
+var assertions = 0
+func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
+    assertions += 1
+    if !condition() { failures.append(message) }
+}
+func window(_ title: String, focused: Bool = false, minimized: Bool = false) -> WindowEntry {
+    WindowEntry(id: title, title: title, element: AXUIElementCreateApplication(1), minimized: minimized, focused: focused)
+}
+let alpha = URL(fileURLWithPath: "/Applications/Alpha.app")
+let beta = URL(fileURLWithPath: "/Applications/Beta.app")
+let running = RunningEntry(pid: 1, name: "Alpha", url: alpha,
+    windows: [window("First", focused: true), window("Second"), window("Third", focused: true, minimized: true)], active: true)
+let grouped = TaskLayout.entries(running: [running], pins: [], grouped: true)
+expect(grouped.count == 1, "Grouped windows create a single task")
+expect(grouped.first?.windows.count == 3, "Grouped task preserves all windows")
+expect(grouped.first?.active == true, "Foreground application is active")
+let ungrouped = TaskLayout.entries(running: [running], pins: [], grouped: false)
+expect(ungrouped.count == 3, "Ungrouped layout creates one task per window")
+expect(ungrouped.map(\.active) == [true, false, false], "Only focused, non-minimized window is active")
+let pins = [ApplicationEntry(url: beta, name: "Beta"), ApplicationEntry(url: alpha, name: "Alpha")]
+let pinned = TaskLayout.entries(running: [running], pins: pins, grouped: true)
+expect(pinned.map(\.url) == [beta, alpha], "Pin order survives an app launch without duplication")
+expect(pinned.map(\.running) == [false, true], "Closed favorites remain launchable")
+let closed = TaskLayout.entries(running: [], pins: pins, grouped: true)
+expect(closed.map(\.url) == [beta, alpha], "Pin order survives app termination")
+let noPermission = RunningEntry(pid: 1, name: "Alpha", url: alpha, windows: [], active: true)
+expect(TaskLayout.entries(running: [noPermission], pins: [], grouped: false, windowsAccessible: false).count == 1, "Fallback app task works without Accessibility")
+let screen = NSRect(x: -1920, y: -200, width: 1920, height: 1080)
+let visible = NSRect(x: -1920, y: -120, width: 1920, height: 980)
+let frame = TaskLayout.frame(screen: screen, visible: visible)
+expect(frame.minY == -120 && frame.minX == -1920, "Bar respects secondary-screen and Dock offsets")
+expect(visible.contains(frame), "Bar stays inside usable screen area")
+let entries = [ApplicationEntry(url: alpha, name: "Café Alpha"), ApplicationEntry(url: beta, name: "Beta")]
+expect(ApplicationCatalog.filter(entries, query: "  CAFE alpha ").map(\.url) == [alpha], "Search handles accents, case, and whitespace")
+expect(ApplicationCatalog.filter(entries, query: " ").count == 2, "Empty query shows all apps")
+expect(ApplicationCatalog.filter(entries, query: "absent").isEmpty, "Unmatched query produces empty results")
+let suite = "MacBarTests.\(UUID().uuidString)"
+let defaults = UserDefaults(suiteName: suite)!
+let preferences = Preferences(defaults: defaults)
+expect(preferences.grouped, "Windows 11 grouped layout is the default")
+preferences.grouped = false
+expect(!Preferences(defaults: defaults).grouped, "Layout preference persists")
+defaults.removePersistentDomain(forName: suite)
+// Regression: maximized windows must stop above the taskbar, in AX coordinates.
+let work = WindowWorkArea(screen: CGRect(x: 0, y: 0, width: 1920, height: 1080),
+    visible: CGRect(x: 0, y: 25, width: 1920, height: 1055), reservedBottom: 1008)
+let maximized = CGRect(x: 0, y: 25, width: 1920, height: 1055)
+let fitted = WindowWorkArea.fitted(maximized, areas: [work])!
+expect(fitted.maxY == 1008, "Maximized window stops above the bar with clearance")
+expect(fitted.origin == maximized.origin && fitted.width == maximized.width, "Fitting preserves width and top-left")
+expect(WindowWorkArea.fitted(fitted, areas: [work]) == nil, "Already fitted window is not resized repeatedly")
+expect(WindowWorkArea.fitted(CGRect(x: 0, y: 25, width: 960, height: 1055), areas: [work])?.maxY == 1008, "Half-screen tile also clears the bar")
+expect(WindowWorkArea.fitted(CGRect(x: 100, y: 400, width: 900, height: 680), areas: [work]) == nil, "Normal manually placed window is not rearranged")
+expect(WindowWorkArea.fitted(maximized, areas: [work], fullScreen: true) == nil, "Native full screen is untouched")
+expect(WindowWorkArea.fitted(maximized, areas: [work], minimized: true) == nil, "Minimized window is untouched")
+let noBar = WindowWorkArea(screen: CGRect(x: -1920, y: -200, width: 1920, height: 1080),
+    visible: CGRect(x: -1920, y: -175, width: 1920, height: 1055), reservedBottom: nil)
+let leftMaximized = noBar.visible
+expect(WindowWorkArea.fitted(leftMaximized, areas: [work, noBar]) == nil, "No resizing on a display without a taskbar")
+let leftBar = WindowWorkArea(screen: noBar.screen, visible: noBar.visible, reservedBottom: 808)
+expect(WindowWorkArea.fitted(leftMaximized, areas: [work, leftBar])?.maxY == 808, "Negative-origin secondary display uses its own reserved area")
+expect(WindowWorkArea.fitted(maximized, areas: []) == nil, "Hidden taskbar does not constrain windows")
+let converted = WindowWorkArea.accessibilityRect(CGRect(x: -1920, y: 1080, width: 1920, height: 1080), primaryTop: 1080)
+expect(converted.minY == -1080 && converted.minX == -1920, "AppKit to AX conversion handles a display above the primary")
+// Native zoom toggles: fit -> native maximizes again -> restore exact user frame.
+let normalFrame = CGRect(x: 180, y: 160, width: 1000, height: 650)
+var zoom = WindowZoomState()
+expect(zoom.update(normalFrame, areas: [work]) == nil, "Observe normal size before zoom")
+for cycle in 1...3 {
+    expect(zoom.update(maximized, areas: [work]) == fitted, "Cycle \(cycle): first native zoom fits above bar")
+    expect(zoom.update(maximized, areas: [work]) == fitted, "Unconfirmed resize never toggles into restore")
+    expect(zoom.update(fitted, areas: [work]) == nil, "Confirm fitted frame")
+    expect(zoom.update(maximized, areas: [work]) == normalFrame, "Cycle \(cycle): second native zoom restores saved frame")
+    expect(zoom.update(normalFrame, areas: [work]) == nil, "Confirm restored frame")
+}
+let manuallyResized = CGRect(x: 210, y: 130, width: 900, height: 600)
+_ = zoom.update(manuallyResized, areas: [work])
+_ = zoom.update(maximized, areas: [work])
+_ = zoom.update(fitted, areas: [work])
+expect(zoom.update(maximized, areas: [work]) == manuallyResized, "Manual resizing updates the restore frame")
+var initialMaximized = WindowZoomState()
+_ = initialMaximized.update(maximized, areas: [work])
+_ = initialMaximized.update(fitted, areas: [work])
+let fallback = initialMaximized.update(maximized, areas: [work])
+expect(fallback != nil && fallback!.height < fitted.height, "Already-maximized window can restore without prior history")
+expect(frame.width == visible.width && frame.minY == visible.minY, "Taskbar is flush, with no outer padding")
+var terminal = WindowZoomState()
+_ = terminal.update(normalFrame, areas: [work])
+_ = terminal.update(maximized, areas: [work])
+let gridFrame = CGRect(x: fitted.minX, y: fitted.minY, width: fitted.width, height: fitted.height - 11)
+expect(terminal.update(gridFrame, areas: [work]) == nil, "Accept Terminal's character-grid height rounding")
+expect(terminal.fitted == gridFrame, "Remember actual grid-aligned maximized frame")
+expect(terminal.normal == normalFrame, "Grid rounding does not overwrite the normal frame")
+expect(terminal.update(maximized, areas: [work]) == normalFrame, "Terminal's next maximize restores the original frame")
+var refused = WindowZoomState()
+_ = refused.update(normalFrame, areas: [work])
+_ = refused.update(maximized, areas: [work])
+expect(refused.update(maximized, areas: [work]) == fitted && refused.fitted == nil, "An unchanged full-size window is not mistaken for a rounded fit")
+let largeLine = CGRect(x: 0, y: 25, width: 1920, height: 1025)
+expect(WindowWorkArea.fitted(largeLine, areas: [work]) != nil, "Large terminal line height still counts as vertical maximization")
+var restarted = WindowZoomState()
+expect(restarted.update(gridFrame, areas: [work]) == nil, "Restart does not change an already fitted Terminal")
+expect(restarted.fitted == gridFrame, "Restart recognizes the prior instance's fitted window")
+let restartRestore = restarted.update(maximized, areas: [work])
+expect(restartRestore != nil && restartRestore!.height < gridFrame.height * 0.8, "First double-click after restart restores a genuinely smaller window")
+// Saved ordering survives closed apps and supports insertion in both directions.
+expect(AppOrdering.reconcile(["b", "a", "b"], visible: ["a", "c"]) == ["b", "a", "c"], "Reconcile deduplicates and preserves closed app positions")
+expect(AppOrdering.moving("c", relativeTo: "a", after: false, in: ["a", "b", "c"]) == ["c", "a", "b"], "Drag left inserts before target")
+expect(AppOrdering.moving("a", relativeTo: "b", after: true, in: ["a", "b", "c"]) == ["b", "a", "c"], "Drag right inserts after target")
+expect(AppOrdering.moving("a", relativeTo: nil, after: true, in: ["a", "b"]) == ["b", "a"], "Empty space appends dragged app")
+expect(AppOrdering.moving("a", relativeTo: "a", after: true, in: ["a", "b"]) == ["a", "b"], "Drop on self keeps order")
+preferences.appOrder = [alpha.path, beta.path]
+expect(Preferences(defaults: defaults).appOrder == [alpha.path, beta.path], "Application order persists across model reload")
+defaults.removePersistentDomain(forName: suite)
+let previewCandidates = [PreviewCandidate(id: 1, title: "Terminal", frame: CGRect(x: 0, y: 0, width: 600, height: 400)), PreviewCandidate(id: 2, title: "Terminal", frame: CGRect(x: 800, y: 0, width: 600, height: 400))]
+expect(PreviewMatching.best(title: "Terminal", frame: CGRect(x: 805, y: 0, width: 600, height: 400), candidates: previewCandidates) == 2, "Duplicate window titles match by position and size")
+expect(PreviewMatching.best(title: "Terminal", frame: nil, candidates: []) == nil, "Missing capture window produces no false match")
+expect(PreviewLayout.width(windowCount: 1, available: 1000) == 248, "One preview has no unused 92-point gutter")
+expect(PreviewLayout.width(windowCount: 2, available: 1000) == 478, "Two previews fit both cards, gap and insets exactly")
+expect(PreviewLayout.width(windowCount: 8, available: 800) == 800, "Preview overflow is constrained to screen width")
+expect(AppOrdering.destination(x: 4, itemWidth: 46, count: 3) == (0, false), "Drop at left edge inserts before first app")
+expect(AppOrdering.destination(x: 80, itemWidth: 46, count: 3) == (1, true), "Drop in second icon right half inserts after it")
+expect(AppOrdering.destination(x: 95, itemWidth: 46, count: 3) == (2, false), "Drop in third icon left half inserts before it")
+expect(AppOrdering.destination(x: 600, itemWidth: 46, count: 3) == (3, true), "Empty row area appends")
+expect(AppOrdering.destination(x: 180, itemWidth: 164, count: 3) == (1, false), "Ungrouped drop uses actual icon width")
+expect(TaskLayout.entries(running: [noPermission], pins: [], grouped: true).isEmpty, "Closing last window removes unpinned app even while process runs")
+expect(TaskLayout.entries(running: [noPermission], pins: [], grouped: false).isEmpty, "Windowless app is hidden in ungrouped mode too")
+let windowlessPin = TaskLayout.entries(running: [noPermission], pins: [ApplicationEntry(url: alpha, name: "Alpha")], grouped: true)
+expect(windowlessPin.count == 1 && windowlessPin[0].pid == nil && !windowlessPin[0].active, "Windowless pinned app stays as launcher without active indicator")
+let minimizedOnly = RunningEntry(pid: 1, name: "Alpha", url: alpha, windows: [window("Reduced", minimized: true)], active: false)
+expect(TaskLayout.entries(running: [minimizedOnly], pins: [], grouped: true).count == 1, "Minimized window remains on taskbar")
+let failedScan = RunningEntry(windowsKnown: false, pid: 1, name: "Alpha", url: alpha, windows: [], active: false)
+expect(TaskLayout.entries(running: [failedScan], pins: [], grouped: true).count == 1, "Failed AX scan does not incorrectly hide the app")
+let recentChoices = [window("First"), window("Last used"), window("Reduced", minimized: true)]
+expect(RecentWindow.choose(recentChoices, focusedID: "Last used", rememberedID: "First")?.id == "Last used", "Click-time focused window wins over stale history")
+expect(RecentWindow.choose(recentChoices, focusedID: nil, rememberedID: "Last used")?.id == "Last used", "Missing focus restores last used window")
+expect(RecentWindow.choose(recentChoices, focusedID: nil, rememberedID: "Reduced")?.id == "Reduced", "Last used minimized window can be restored")
+expect(RecentWindow.choose(recentChoices, focusedID: nil, rememberedID: "Closed")?.id == "First", "Closed remembered window falls back to an existing window")
+expect(RecentWindow.choose([window("Reduced", minimized: true)], focusedID: nil, rememberedID: nil)?.id == "Reduced", "All-minimized group still has a restorable window")
+expect(RecentWindow.choose([], focusedID: nil, rememberedID: "Closed") == nil, "Empty group has no stale window target")
+expect(DockBadge.normalized("") == nil, "Empty Dock badge is removed")
+expect(DockBadge.normalized(" ") == "•", "Whitespace badge remains a notification dot")
+expect(DockBadge.normalized(" 12 ") == "12", "Dock badge trims incidental whitespace")
+expect(DockBadge.display("120") == "99+", "Large badge counts fit on the icon")
+expect(DockBadge.display("!") == "!", "Non-numeric app badge is preserved")
+expect(DockBadge.display("HELLO") == "HEL…", "Long labels cannot overflow the icon")
+let hiddenApp = RunningEntry(hidden: true, pid: 1, name: "Alpha", url: alpha, windows: [], active: false)
+expect(TaskLayout.entries(running: [hiddenApp], pins: [], grouped: true).first?.pid == 1, "Hidden app stays launchable even if AX omits its hidden windows")
+expect(TaskLayout.entries(running: [hiddenApp], pins: [], grouped: false).count == 1, "Hidden app stays available in ungrouped mode")
+for failure in failures { print("FAIL: \(failure)") }
+print("\(assertions - failures.count)/\(assertions) assertions passed")
+exit(failures.isEmpty ? 0 : 1)
