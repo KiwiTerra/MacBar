@@ -48,6 +48,7 @@ The taskbar is compact, left-aligned, and built with **Swift, AppKit, and SwiftU
 | **Notification badges** | Display badges exposed by the Dock, including counts, labels, and compact “99+” formatting. |
 | **Application launcher** | Search, open, and pin applications, with keyboard navigation. |
 | **Room for windows** | Adjust maximized window height so windows stop above the taskbar. |
+| **Full-screen aware** | The taskbar hides itself on any display showing a full-screen window, and returns when it ends. |
 | **Native options** | Multiple displays, launch at login, and access to options from the macOS menu bar. |
 
 ## Installation
