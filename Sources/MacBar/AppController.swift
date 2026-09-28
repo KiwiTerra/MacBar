@@ -30,6 +30,10 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var localMonitor: Any?
     private var globalMonitor: Any?
     private var hidden = false
+    private var barShown: [Bool] = []
+    private var spaceObservers: [NSObjectProtocol] = []
+    private let visibilityQueue = DispatchQueue(label: "dev.local.MacBar.full-screen-visibility", qos: .utility)
+    private var visibilityGeneration = 0
     private var lastLayoutSignature = ""
     private var layoutTimer: Timer?
     private let smokeTest = CommandLine.arguments.contains("--smoke-test")
@@ -51,7 +55,18 @@ final class AppController: NSObject, NSApplicationDelegate {
         rebuildBars()
         screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                                object: nil, queue: .main) { [weak self] _ in self?.rebuildBars() }
-        layoutTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.updateFrames() }
+        layoutTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            self?.updateFrames()
+            self?.applyBarVisibility()
+        }
+        // Full-screen transitions animate, so re-check once the new Space has settled.
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.didActivateApplicationNotification] {
+            spaceObservers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.applyBarVisibility()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { self?.applyBarVisibility() }
+            })
+        }
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { [weak self] event in
             guard let self, let launcher = self.launcher, launcher.isVisible else { return event }
             if event.type == .keyDown, event.keyCode == 53 {
@@ -81,6 +96,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+        spaceObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
         layoutTimer?.invalidate()
         windowFitter.stop()
     }
@@ -107,8 +123,60 @@ final class AppController: NSObject, NSApplicationDelegate {
             if !hidden { panel.orderFrontRegardless() }
             return panel
         }
+        barShown = Array(repeating: !hidden, count: bars.count)
+        applyBarVisibility()
         lastLayoutSignature = ""
         updateFrames()
+    }
+    /// Shows or hides each bar: hidden by the user, or covered by a full-screen window on its display.
+    private func applyBarVisibility() {
+        guard barShown.count == bars.count else { return }
+        let screens = selectedScreens
+        guard screens.count == bars.count, let primary = NSScreen.screens.first else { return }
+        let areas = screens.map { WindowWorkArea.accessibilityRect($0.frame, primaryTop: primary.frame.maxY) }
+        visibilityGeneration += 1
+        let generation = visibilityGeneration
+        if hidden {
+            updateBarVisibility(areas: areas, covered: [])
+            return
+        }
+        visibilityQueue.async { [weak self] in
+            let covered = Self.fullScreenCoverage()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.visibilityGeneration == generation else { return }
+                self.updateBarVisibility(areas: areas, covered: covered)
+            }
+        }
+    }
+    private func updateBarVisibility(areas: [CGRect], covered: [CGRect]) {
+        guard areas.count == bars.count, barShown.count == bars.count else { return }
+        for (index, (panel, area)) in zip(bars, areas).enumerated() {
+            let shouldShow = !hidden && !covered.contains { abs($0.minX - area.minX) < 1 && abs($0.minY - area.minY) < 1 && abs($0.width - area.width) < 1 && abs($0.height - area.height) < 1 }
+            guard shouldShow != barShown[index] else { continue }
+            barShown[index] = shouldShow
+            if shouldShow { panel.orderFrontRegardless() } else {
+                previewController.hide()
+                panel.orderOut(nil)
+            }
+        }
+    }
+    /// Bounds of full-screen surfaces. A native full-screen Space adds a display-sized window owned by the
+    /// Dock (undocumented layer below the desktop); that is the reliable signal, because some apps such as
+    /// Chromium browsers report an odd window frame. Other apps' windows that cover a whole display, menu
+    /// bar included, also count, which catches non-native full screen. A maximized window stops below the
+    /// menu bar, so it never matches.
+    private static func fullScreenCoverage() -> [CGRect] {
+        guard let info = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else { return [] }
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let dockFullScreenLayer = -2147483622
+        return info.compactMap { entry in
+            guard let layer = entry[kCGWindowLayer as String] as? Int,
+                  let bounds = entry[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: bounds) else { return nil }
+            if layer == dockFullScreenLayer, entry[kCGWindowOwnerName as String] as? String == "Dock" { return rect }
+            guard layer == 0, entry[kCGWindowOwnerPID as String] as? pid_t != ownPID else { return nil }
+            return rect
+        }
     }
     private func updateFrames() {
         let screens = selectedScreens
@@ -190,7 +258,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.previewController.hide()
             self.hidden.toggle()
-            self.bars.forEach { self.hidden ? $0.orderOut(nil) : $0.orderFrontRegardless() }
+            self.applyBarVisibility()
             self.windowFitter.schedule()
         }
         add("Launch at Login", to: menu, checked: SMAppService.mainApp.status == .enabled) { [weak self] in
