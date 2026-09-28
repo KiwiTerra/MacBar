@@ -32,6 +32,8 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var hidden = false
     private var barShown: [Bool] = []
     private var spaceObservers: [NSObjectProtocol] = []
+    private let visibilityQueue = DispatchQueue(label: "dev.local.MacBar.full-screen-visibility", qos: .utility)
+    private var visibilityGeneration = 0
     private var lastLayoutSignature = ""
     private var layoutTimer: Timer?
     private let smokeTest = CommandLine.arguments.contains("--smoke-test")
@@ -131,9 +133,24 @@ final class AppController: NSObject, NSApplicationDelegate {
         guard barShown.count == bars.count else { return }
         let screens = selectedScreens
         guard screens.count == bars.count, let primary = NSScreen.screens.first else { return }
-        let covered = fullScreenCoverage(primaryTop: primary.frame.maxY)
-        for (index, (panel, screen)) in zip(bars, screens).enumerated() {
-            let area = WindowWorkArea.accessibilityRect(screen.frame, primaryTop: primary.frame.maxY)
+        let areas = screens.map { WindowWorkArea.accessibilityRect($0.frame, primaryTop: primary.frame.maxY) }
+        visibilityGeneration += 1
+        let generation = visibilityGeneration
+        if hidden {
+            updateBarVisibility(areas: areas, covered: [])
+            return
+        }
+        visibilityQueue.async { [weak self] in
+            let covered = Self.fullScreenCoverage()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.visibilityGeneration == generation else { return }
+                self.updateBarVisibility(areas: areas, covered: covered)
+            }
+        }
+    }
+    private func updateBarVisibility(areas: [CGRect], covered: [CGRect]) {
+        guard areas.count == bars.count, barShown.count == bars.count else { return }
+        for (index, (panel, area)) in zip(bars, areas).enumerated() {
             let shouldShow = !hidden && !covered.contains { abs($0.minX - area.minX) < 1 && abs($0.minY - area.minY) < 1 && abs($0.width - area.width) < 1 && abs($0.height - area.height) < 1 }
             guard shouldShow != barShown[index] else { continue }
             barShown[index] = shouldShow
@@ -148,7 +165,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     /// Chromium browsers report an odd window frame. Other apps' windows that cover a whole display, menu
     /// bar included, also count, which catches non-native full screen. A maximized window stops below the
     /// menu bar, so it never matches.
-    private func fullScreenCoverage(primaryTop: CGFloat) -> [CGRect] {
+    private static func fullScreenCoverage() -> [CGRect] {
         guard let info = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else { return [] }
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let dockFullScreenLayer = -2147483622
