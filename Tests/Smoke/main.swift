@@ -64,6 +64,11 @@ expect(WindowWorkArea.fitted(leftMaximized, areas: [work, noBar]) == nil, "No re
 let leftBar = WindowWorkArea(screen: noBar.screen, visible: noBar.visible, reservedBottom: 808)
 expect(WindowWorkArea.fitted(leftMaximized, areas: [work, leftBar])?.maxY == 808, "Negative-origin secondary display uses its own reserved area")
 expect(WindowWorkArea.fitted(maximized, areas: []) == nil, "Hidden taskbar does not constrain windows")
+let display = CGRect(x: 0, y: 0, width: 1728, height: 1117)
+expect(WindowWorkArea.fullScreenCandidate(CGRect(x: 0, y: 33, width: 1728, height: 1084), display: display), "Full screen below a visible menu bar is a candidate")
+expect(!WindowWorkArea.fullScreenCandidate(display, display: display), "Whole-display cover is handled without an AX check")
+expect(!WindowWorkArea.fullScreenCandidate(CGRect(x: 0, y: 33, width: 1728, height: 1028), display: display), "Window fitted above the bar is not a candidate")
+expect(!WindowWorkArea.fullScreenCandidate(CGRect(x: 0, y: 33, width: 864, height: 1084), display: display), "Half-screen tile is not a candidate")
 let converted = WindowWorkArea.accessibilityRect(CGRect(x: -1920, y: 1080, width: 1920, height: 1080), primaryTop: 1080)
 expect(converted.minY == -1080 && converted.minX == -1920, "AppKit to AX conversion handles a display above the primary")
 // Native zoom toggles: fit -> native maximizes again -> restore exact user frame.

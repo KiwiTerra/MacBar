@@ -144,6 +144,15 @@ struct WindowWorkArea {
         CGRect(x: rect.minX, y: primaryTop - rect.maxY, width: rect.width, height: rect.height)
     }
 
+    /// A native full-screen window can leave the menu bar visible, so it spans the display's width and
+    /// reaches its bottom edge but starts below the top. A maximized, not yet fitted window has the same
+    /// shape, so a match is only a candidate that still needs an AXFullScreen check.
+    static func fullScreenCandidate(_ window: CGRect, display: CGRect) -> Bool {
+        abs(window.minX - display.minX) < 1 && abs(window.width - display.width) < 1
+            && abs(window.maxY - display.maxY) < 1
+            && window.minY > display.minY + 1 && window.minY - display.minY <= 80
+    }
+
     static func fitted(_ window: CGRect, areas: [WindowWorkArea], fullScreen: Bool = false,
                        minimized: Bool = false) -> CGRect? {
         guard !fullScreen, !minimized, window.width >= 120, window.height >= 120 else { return nil }

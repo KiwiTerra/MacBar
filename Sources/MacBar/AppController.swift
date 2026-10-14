@@ -141,7 +141,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             return
         }
         visibilityQueue.async { [weak self] in
-            let covered = Self.fullScreenCoverage()
+            let covered = Self.fullScreenCoverage(displays: areas)
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.visibilityGeneration == generation else { return }
                 self.updateBarVisibility(areas: areas, covered: covered)
@@ -160,23 +160,41 @@ final class AppController: NSObject, NSApplicationDelegate {
             }
         }
     }
-    /// Bounds of full-screen surfaces. A native full-screen Space adds a display-sized window owned by the
-    /// Dock (undocumented layer below the desktop); that is the reliable signal, because some apps such as
-    /// Chromium browsers report an odd window frame. Other apps' windows that cover a whole display, menu
-    /// bar included, also count, which catches non-native full screen. A maximized window stops below the
-    /// menu bar, so it never matches.
-    private static func fullScreenCoverage() -> [CGRect] {
+    /// Bounds of full-screen surfaces. A native full-screen Space may add a display-sized window owned by
+    /// the Dock (undocumented layer below the desktop); that signal covers apps such as Chromium browsers
+    /// that report an odd window frame, but newer macOS releases do not always provide it. Other apps'
+    /// windows that cover a whole display, menu bar included, also count, which catches non-native full
+    /// screen. When the menu bar stays visible in full screen, the window starts below it like a maximized
+    /// window, so those candidates are confirmed through AXFullScreen.
+    private static func fullScreenCoverage(displays: [CGRect]) -> [CGRect] {
         guard let info = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else { return [] }
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let dockFullScreenLayer = -2147483622
-        return info.compactMap { entry in
+        var candidates: [(pid: pid_t, frame: CGRect, display: CGRect)] = []
+        var covered: [CGRect] = info.compactMap { entry in
             guard let layer = entry[kCGWindowLayer as String] as? Int,
                   let bounds = entry[kCGWindowBounds as String] as? NSDictionary,
                   let rect = CGRect(dictionaryRepresentation: bounds) else { return nil }
             if layer == dockFullScreenLayer, entry[kCGWindowOwnerName as String] as? String == "Dock" { return rect }
-            guard layer == 0, entry[kCGWindowOwnerPID as String] as? pid_t != ownPID else { return nil }
+            guard layer == 0, let pid = entry[kCGWindowOwnerPID as String] as? pid_t, pid != ownPID else { return nil }
+            if let display = displays.first(where: { WindowWorkArea.fullScreenCandidate(rect, display: $0) }) {
+                candidates.append((pid, rect, display))
+            }
             return rect
         }
+        guard !candidates.isEmpty, AXIsProcessTrusted() else { return covered }
+        for (pid, owned) in Dictionary(grouping: candidates, by: \.pid) {
+            let application = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(application, 0.15)
+            let windows: [AXUIElement] = WindowService.value(application, kAXWindowsAttribute) ?? []
+            for window in windows {
+                guard WindowService.value(window, "AXFullScreen") == true,
+                      let frame = WindowFitter.frame(of: window),
+                      let match = owned.first(where: { WindowZoomState.matches($0.frame, frame) }) else { continue }
+                covered.append(match.display)
+            }
+        }
+        return covered
     }
     private func updateFrames() {
         let screens = selectedScreens
